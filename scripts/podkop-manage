@@ -1,0 +1,285 @@
+#!/bin/sh
+# podkop-manage — CLI управление списками podkop-monitor
+#
+# podkop-manage add domain <host>       — добавить домен напрямую в UCI
+# podkop-manage add ip <addr>           — добавить IP/подсеть в UCI
+# podkop-manage add candidate <host>    — добавить в мониторинг
+# podkop-manage remove domain <host>    — удалить из UCI
+# podkop-manage remove ip <addr>        — удалить из UCI
+# podkop-manage remove candidate <host> — удалить из мониторинга
+# podkop-manage list domains            — показать домены в UCI
+# podkop-manage list ips                — показать подсети в UCI
+# podkop-manage list candidates         — показать кандидатов
+# podkop-manage list state              — счётчики blockcheck
+# podkop-manage status <host>           — статус хоста
+# podkop-manage reset <host>            — сбросить счётчик неудач
+# podkop-manage source add <URL>        — добавить remote-источник
+# podkop-manage source list             — список источников
+# podkop-manage check <host>            — разовая проверка хоста прямо сейчас
+# podkop-manage reload                  — перезагрузить podkop
+
+CONF="/etc/podkop-monitor/podkop-monitor.conf"
+[ -f "$CONF" ] && . "$CONF"
+
+BASE_DIR="${BASE_DIR:-/etc/podkop-monitor}"
+SECTION="${PODKOP_SECTION:-MY_VPN_SECTION}"
+WAN_IFACE="${WAN_IFACE:-eth1}"
+CURL_TIMEOUT="${CURL_TIMEOUT:-8}"
+VPS_HOST="${VPS_HOST:-root@vps}"
+DNS_TRUSTED="${DNS_TRUSTED:-8.8.8.8}"
+
+MANUAL="$BASE_DIR/manual.txt"
+STATE_DB="$BASE_DIR/state.db"
+SOURCES_FILE="$BASE_DIR/remote-sources.txt"
+CANDIDATES_DIR="$BASE_DIR/candidates.d"
+
+GRN='\033[0;32m'; YLW='\033[0;33m'; RED='\033[0;31m'; NC='\033[0m'
+ok()   { printf "${GRN}✓${NC} %s\n" "$*"; }
+err()  { printf "${RED}✗${NC} %s\n" "$*" >&2; }
+info() { printf "${YLW}→${NC} %s\n" "$*"; }
+
+is_ip() { echo "$1" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]+)?$'; }
+
+uci_has() {
+    uci get "podkop.$SECTION.$1" 2>/dev/null | tr ' ' '\n' | grep -qxF "$2"
+}
+
+uci_del_val() {
+    key="$1"; val="$2"
+    all=$(uci get "podkop.$SECTION.$key" 2>/dev/null)
+    uci delete "podkop.$SECTION.$key" 2>/dev/null || true
+    echo "$all" | tr ' ' '\n' | while IFS= read -r v; do
+        v=$(echo "$v" | tr -d "'\" \t\r\n")
+        [ -z "$v" ] || [ "$v" = "$val" ] && continue
+        uci add_list "podkop.$SECTION.$key=$v"
+    done
+}
+
+usage() { cat <<'EOF'
+podkop-manage — управление podkop-monitor
+
+  add domain <host>        Добавить домен напрямую в UCI (статус: manual)
+  add ip <addr>            Добавить IP/подсеть напрямую
+  add candidate <host>     Добавить в список мониторинга
+
+  remove domain <host>     Удалить из UCI → вернуть в мониторинг
+  remove ip <addr>         Удалить IP из UCI
+  remove candidate <host>  Удалить из мониторинга
+
+  list domains             Домены в UCI
+  list ips                 Подсети в UCI
+  list candidates          Кандидаты для мониторинга
+  list state               Счётчики blockcheck
+
+  status <host>            Статус конкретного хоста
+  reset <host>             Сбросить счётчик неудач
+  check <host>             Проверить прямо сейчас (wan + vps ping)
+
+  source add <URL>         Добавить remote-источник кандидатов
+  source list              Список remote-источников
+
+  reload                   Перезагрузить podkop
+EOF
+}
+
+cmd_add() {
+    type="$1"; host="$2"
+    [ -z "$host" ] && { err "укажи хост"; exit 1; }
+    case "$type" in
+        domain)
+            if uci_has "user_domains" "$host"; then
+                info "$host уже в user_domains"
+            else
+                uci add_list "podkop.$SECTION.user_domains=$host"
+                uci commit podkop
+                tmp=$(mktemp)
+                grep -v "^$host " "$STATE_DB" > "$tmp" 2>/dev/null || true
+                echo "$host 0 0 manual" >> "$tmp"; mv "$tmp" "$STATE_DB"
+                ok "Добавлен домен: $host"
+            fi ;;
+        ip)
+            if uci_has "user_subnets" "$host"; then
+                info "$host уже в user_subnets"
+            else
+                uci add_list "podkop.$SECTION.user_subnets=$host"
+                uci commit podkop
+                tmp=$(mktemp)
+                grep -v "^$host " "$STATE_DB" > "$tmp" 2>/dev/null || true
+                echo "$host 0 0 manual" >> "$tmp"; mv "$tmp" "$STATE_DB"
+                ok "Добавлен IP: $host"
+            fi ;;
+        candidate)
+            mkdir -p "$BASE_DIR"; touch "$MANUAL"
+            if grep -qxF "$host" "$MANUAL" 2>/dev/null; then
+                info "$host уже в manual.txt"
+            else
+                echo "$host" >> "$MANUAL"
+                ok "Кандидат добавлен: $host"
+            fi ;;
+        *) err "тип: domain | ip | candidate"; exit 1 ;;
+    esac
+}
+
+cmd_remove() {
+    type="$1"; host="$2"
+    [ -z "$host" ] && { err "укажи хост"; exit 1; }
+    case "$type" in
+        domain)
+            uci_del_val "user_domains" "$host"
+            uci commit podkop
+            tmp=$(mktemp)
+            grep -v "^$host " "$STATE_DB" > "$tmp" 2>/dev/null || true
+            echo "$host 0 0 watching" >> "$tmp"; mv "$tmp" "$STATE_DB"
+            ok "Удалён домен: $host" ;;
+        ip)
+            uci_del_val "user_subnets" "$host"
+            uci commit podkop
+            tmp=$(mktemp)
+            grep -v "^$host " "$STATE_DB" > "$tmp" 2>/dev/null || true
+            echo "$host 0 0 watching" >> "$tmp"; mv "$tmp" "$STATE_DB"
+            ok "Удалён IP: $host" ;;
+        candidate)
+            grep -vxF "$host" "$MANUAL" > /tmp/mn.tmp 2>/dev/null || true
+            mv /tmp/mn.tmp "$MANUAL"
+            ok "Удалён кандидат: $host" ;;
+        *) err "тип: domain | ip | candidate"; exit 1 ;;
+    esac
+}
+
+cmd_list() {
+    case "$1" in
+        domains)
+            printf "\n${GRN}=== UCI user_domains ===${NC}\n"
+            uci get "podkop.$SECTION.user_domains" 2>/dev/null \
+                | tr ' ' '\n' | grep -v '^$' | sort || echo "(пусто)" ;;
+        ips)
+            printf "\n${GRN}=== UCI user_subnets ===${NC}\n"
+            uci get "podkop.$SECTION.user_subnets" 2>/dev/null \
+                | tr ' ' '\n' | grep -v '^$' | sort || echo "(пусто)" ;;
+        candidates)
+            printf "\n${GRN}=== Кандидаты ===${NC}\n"
+            echo "--- manual.txt ---"
+            cat "$MANUAL" 2>/dev/null || echo "(пусто)"
+            echo ""
+            echo "--- remote (candidates.d/) ---"
+            for f in "$CANDIDATES_DIR"/*.txt; do
+                [ -f "$f" ] || continue
+                printf "[%s]: %d строк\n" "$(basename "$f")" "$(wc -l < "$f")"
+            done ;;
+        state)
+            printf "\n${GRN}=== Состояние мониторинга ===${NC}\n"
+            printf "%-40s %6s %6s  %s\n" "HOST" "FAILS" "TOTAL" "STATUS"
+            printf "%-40s %6s %6s  %s\n" "────────────────────────────────────────" "──────" "──────" "────────"
+            sort "$STATE_DB" 2>/dev/null | while IFS= read -r line; do
+                h=$(echo "$line" | awk '{print $1}')
+                f=$(echo "$line" | awk '{print $2}')
+                t=$(echo "$line" | awk '{print $3}')
+                s=$(echo "$line" | awk '{print $4}')
+                case "$s" in
+                    auto_added) printf "${GRN}%-40s %6s %6s  %s${NC}\n" "$h" "$f" "$t" "$s" ;;
+                    manual)     printf "${YLW}%-40s %6s %6s  %s${NC}\n" "$h" "$f" "$t" "$s" ;;
+                    watching)   [ "${f:-0}" -ge 1 ] \
+                                && printf "${RED}%-40s %6s %6s  %s${NC}\n" "$h" "$f" "$t" "$s" \
+                                || printf "%-40s %6s %6s  %s\n" "$h" "$f" "$t" "$s" ;;
+                    *)          printf "%-40s %6s %6s  %s\n" "$h" "$f" "$t" "$s" ;;
+                esac
+            done ;;
+        *) err "укажи: domains | ips | candidates | state"; exit 1 ;;
+    esac
+}
+
+cmd_status() {
+    host="$1"; [ -z "$host" ] && { err "укажи хост"; exit 1; }
+    line=$(grep "^$host " "$STATE_DB" 2>/dev/null | head -1)
+    echo "Хост:          $host"
+    echo "Неудач подряд: $(echo "$line" | awk '{print $2+0}')"
+    echo "Всего добавлений: $(echo "$line" | awk '{print $3+0}')"
+    echo "Статус:        $(echo "$line" | awk '{print $4}')"
+    uci_has "user_domains" "$host" && echo "В UCI:         user_domains ✓"
+    uci_has "user_subnets" "$host" && echo "В UCI:         user_subnets ✓"
+    grep -qxF "$host" "$MANUAL" 2>/dev/null && echo "Мониторинг:    manual.txt ✓"
+}
+
+cmd_reset() {
+    host="$1"; [ -z "$host" ] && { err "укажи хост"; exit 1; }
+    line=$(grep "^$host " "$STATE_DB" 2>/dev/null | head -1)
+    total=$(echo "$line" | awk '{print $3+0}')
+    status=$(echo "$line" | awk '{print $4}'); status="${status:-watching}"
+    tmp=$(mktemp)
+    grep -v "^$host " "$STATE_DB" > "$tmp" 2>/dev/null || true
+    echo "$host 0 $total $status" >> "$tmp"; mv "$tmp" "$STATE_DB"
+    ok "Счётчик сброшен: $host"
+}
+
+cmd_check() {
+    host="$1"; [ -z "$host" ] && { err "укажи хост"; exit 1; }
+    echo "Проверка: $host"
+    echo -n "  WAN curl ($WAN_IFACE)... "
+    if curl -sf --interface "$WAN_IFACE" \
+            --connect-timeout "$CURL_TIMEOUT" \
+            --max-time $((CURL_TIMEOUT+3)) \
+            -o /dev/null "https://$host/" 2>/dev/null; then
+        printf "${GRN}OK${NC}\n"
+        return
+    else
+        ec=$?
+        [ "$ec" -eq 35 ] && { printf "${GRN}OK (SSL)${NC}\n"; return; }
+        printf "${RED}FAIL (exit $ec)${NC}\n"
+    fi
+
+    echo -n "  VPS ping ($VPS_HOST)... "
+    if is_ip "$host"; then
+        target="$host"
+    else
+        target=$(nslookup "$host" "$DNS_TRUSTED" 2>/dev/null \
+            | awk '/^Address/{print $2}' | grep -v ':' | head -1)
+        echo -n "(→ $target) "
+    fi
+    if ssh -i "$SSH_KEY" -o ConnectTimeout=15 -o StrictHostKeyChecking=no -o BatchMode=yes \
+           "$VPS_HOST" "ping -c 3 -W 3 '$target' >/dev/null 2>&1" 2>/dev/null; then
+        printf "${GRN}OK — заблокирован у провайдера${NC}\n"
+        echo "  Добавить в podkop? [y/N]"
+        read -r ans
+        [ "$ans" = "y" ] || [ "$ans" = "Y" ] && {
+            cmd_add "$(is_ip "$host" && echo ip || echo domain)" "$host"
+            cmd_reload
+        }
+    else
+        printf "${RED}FAIL — сервер глобально недоступен${NC}\n"
+    fi
+}
+
+cmd_source() {
+    action="$1"; url="$2"
+    mkdir -p "$BASE_DIR"; touch "$SOURCES_FILE"
+    case "$action" in
+        add)
+            [ -z "$url" ] && { err "укажи URL"; exit 1; }
+            grep -qxF "$url" "$SOURCES_FILE" && { info "URL уже есть"; exit 0; }
+            echo "$url" >> "$SOURCES_FILE"; ok "Добавлен: $url" ;;
+        list)
+            printf "\n${GRN}=== Remote-источники ===${NC}\n"
+            cat "$SOURCES_FILE" 2>/dev/null || echo "(пусто)" ;;
+        *) err "add <URL> | list"; exit 1 ;;
+    esac
+}
+
+cmd_reload() {
+    /etc/init.d/podkop reload 2>/dev/null \
+        && ok "podkop перезагружен" \
+        || err "ошибка reload"
+}
+
+ACTION="$1"; shift
+case "$ACTION" in
+    add)       cmd_add "$@" ;;
+    remove)    cmd_remove "$@" ;;
+    list)      cmd_list "$@" ;;
+    status)    cmd_status "$@" ;;
+    reset)     cmd_reset "$@" ;;
+    check)     cmd_check "$@" ;;
+    source)    cmd_source "$@" ;;
+    reload)    cmd_reload ;;
+    ""|help)   usage ;;
+    *)         err "неизвестная команда: $ACTION"; usage; exit 1 ;;
+esac
