@@ -54,29 +54,23 @@ reset_clean() {
     mv "$tmp" "$CLEAN_DB"
 }
 
-# ── Удалить из podkop UCI ─────────────────────────────────────────────────────
+# ── Удалить из файловых списков podkop ───────────────────────────────────────
 remove_from_podkop() {
     host="$1"
-    if is_ip "$host"; then
-        uci_key="user_subnets"
-    else
-        uci_key="user_domains"
-    fi
+    OUT_DOMAINS="${OUT_DOMAINS:-/etc/podkop-monitor/auto-domains.lst}"
+    OUT_SUBNETS="${OUT_SUBNETS:-/etc/podkop-monitor/auto-subnets.lst}"
 
-    # Читаем все значения, пересобираем без удаляемого
-    all=$(uci get "podkop.$PODKOP_SECTION.$uci_key" 2>/dev/null)
-    uci delete "podkop.$PODKOP_SECTION.$uci_key" 2>/dev/null || true
-    changed=0
-    echo "$all" | tr ' ' '\n' | while IFS= read -r v; do
-        v=$(echo "$v" | tr -d "'\" \t\r\n")
-        [ -z "$v" ] && continue
-        if [ "$v" = "$host" ]; then
-            changed=1
-            continue
-        fi
-        uci add_list "podkop.$PODKOP_SECTION.$uci_key=$v"
-    done
-    uci commit podkop
+    if is_ip "$host"; then
+        tmp=$(mktemp)
+        grep -vxF "$host" "$OUT_SUBNETS" > "$tmp" 2>/dev/null || true
+        mv "$tmp" "$OUT_SUBNETS"
+        log "REMOVED subnet: $host"
+    else
+        tmp=$(mktemp)
+        grep -vxF "$host" "$OUT_DOMAINS" > "$tmp" 2>/dev/null || true
+        mv "$tmp" "$OUT_DOMAINS"
+        log "REMOVED domain: $host"
+    fi
 
     # Обновить state.db: вернуть в watching
     line=$(grep "^$host " "$STATE_DB" 2>/dev/null | head -1)

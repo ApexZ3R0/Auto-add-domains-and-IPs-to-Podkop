@@ -11,13 +11,15 @@ CONF="/etc/podkop-monitor/podkop-monitor.conf"
 BASE_DIR="${BASE_DIR:-/etc/podkop-monitor}"
 WAN_IFACE="${WAN_IFACE:-eth1}"             # WAN-интерфейс с белым IP
 PODKOP_SECTION="${PODKOP_SECTION:-MY_VPN_SECTION}"
-VPS_HOST="${VPS_HOST:-root@vps}"           # SSH-цель: зарубежный VPS
+VPS_HOST="${VPS_HOST:-root@vps}"           # SSH-цель в Германии
 FAIL_THRESHOLD="${FAIL_THRESHOLD:-3}"      # неудач подряд до VPS-проверки
 CURL_TIMEOUT="${CURL_TIMEOUT:-8}"          # секунд на TCP
 VPS_SSH_TIMEOUT="${VPS_SSH_TIMEOUT:-15}"
 SSH_KEY="${SSH_KEY:-/root/.ssh/id_rsa}"
 DNS_TRUSTED="${DNS_TRUSTED:-8.8.8.8}"
 LOG_TAG="blockcheck"
+OUT_DOMAINS="${OUT_DOMAINS:-/etc/podkop-monitor/auto-domains.lst}"
+OUT_SUBNETS="${OUT_SUBNETS:-/etc/podkop-monitor/auto-subnets.lst}"
 # ─────────────────────────────────────────────────────────────────────────────
 
 STATE_DB="$BASE_DIR/state.db"
@@ -75,25 +77,32 @@ is_ip() { echo "$1" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]+)?$'; }
 # ── Проверка через WAN (белый IP) ─────────────────────────────────────────────
 probe_wan() {
     host="$1"
-    curl -s \
-        --max-redirs 0 \
-        --interface "$WAN_IFACE" \
-        --connect-timeout "$CURL_TIMEOUT" \
-        --max-time $((CURL_TIMEOUT+3)) \
-        -o /dev/null \
-        "https://$host/" 2>/dev/null
-    ec=$?
-    case "$ec" in
-        0|22|35|56) return 0 ;;
-        7) curl -s --max-redirs 0 --interface "$WAN_IFACE" \
-               --connect-timeout "$CURL_TIMEOUT" \
-               --max-time $((CURL_TIMEOUT+3)) \
-               -o /dev/null "http://$host/" 2>/dev/null
-           [ $? -eq 0 ] || [ $? -eq 22 ] || [ $? -eq 35 ] && return 0
-           return 1 ;;
-        *) return 1 ;;
-    esac
+    # Пробуем порт 443 (HTTPS) и 80 (HTTP)
+    # Если хотя бы один отвечает — сервер доступен
+    # exit 0/35 = TCP работает, exit 7 = refused (но сервер ответил!), exit 28/6 = недоступен
+    for port in 443 80; do
+        if [ "$port" -eq 443 ]; then
+            url="https://$host/"
+        else
+            url="http://$host/"
+        fi
+        curl -s \
+            --max-redirs 0 \
+            --interface "$WAN_IFACE" \
+            --connect-timeout "$CURL_TIMEOUT" \
+            --max-time $((CURL_TIMEOUT+3)) \
+            -o /dev/null \
+            "$url" 2>/dev/null
+        ec=$?
+        case "$ec" in
+            0|35|22) return 0 ;;  # OK / SSL error / HTTP error — TCP работает
+            7)       return 0 ;;  # Connection refused — но TCP дошёл до сервера
+        esac
+    done
+    return 1  # Оба порта недоступны — заблокирован или не существует
 }
+
+# ── Ping с VPS через SSH ───────────────────────────────────────────────────────
 probe_vps_ping() {
     host="$1"
     if is_ip "$host"; then
@@ -117,13 +126,12 @@ probe_vps_ping() {
 add_to_podkop() {
     host="$1"
     if is_ip "$host"; then
-        uci add_list "podkop.$PODKOP_SECTION.user_subnets=$host"
-        log "ADDED subnet: $host"
+        grep -qxF "$host" "$OUT_SUBNETS" 2>/dev/null || echo "$host" >> "$OUT_SUBNETS"
+        log "ADDED subnet: $host → $OUT_SUBNETS"
     else
-        uci add_list "podkop.$PODKOP_SECTION.user_domains=$host"
-        log "ADDED domain: $host"
+        grep -qxF "$host" "$OUT_DOMAINS" 2>/dev/null || echo "$host" >> "$OUT_DOMAINS"
+        log "ADDED domain: $host → $OUT_DOMAINS"
     fi
-    uci commit podkop
 
     # Записать с пометкой auto_added (для ночной очистки)
     line=$(_state_line "$host")
@@ -134,10 +142,14 @@ add_to_podkop() {
 # ── Уже в UCI? ────────────────────────────────────────────────────────────────
 in_podkop() {
     host="$1"
-    uci get "podkop.$PODKOP_SECTION.user_domains" 2>/dev/null \
-        | tr ' ' '\n' | grep -qxF "$host" && return 0
-    uci get "podkop.$PODKOP_SECTION.user_subnets" 2>/dev/null \
-        | tr ' ' '\n' | grep -qxF "$host" && return 0
+    # Проверить в файлах автодобавления
+    grep -qxF "$host" "$OUT_DOMAINS" 2>/dev/null && return 0
+    grep -qxF "$host" "$OUT_SUBNETS" 2>/dev/null && return 0
+    # Проверить в ручном текстовом списке podkop
+    uci get "podkop.$PODKOP_SECTION.user_domains_text" 2>/dev/null \
+        | grep -qxF "$host" && return 0
+    uci get "podkop.$PODKOP_SECTION.user_subnets_text" 2>/dev/null \
+        | grep -qxF "$host" && return 0
     return 1
 }
 

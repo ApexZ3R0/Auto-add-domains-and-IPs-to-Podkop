@@ -1,9 +1,9 @@
 #!/bin/sh
 # install.sh — установка podkop-monitor
 # Установка (OpenWrt / busybox):
-#   wget -O /tmp/install.sh https://raw.githubusercontent.com/ApexZ3R0/Dynamic-lists-for-podkop/main/install.sh && sh /tmp/install.sh
+#   wget -O /tmp/install.sh https://raw.githubusercontent.com/ApexZ3R0/Auto-add-domains-and-IPs-to-Podkop/main/install.sh && sh /tmp/install.sh
 
-REPO_RAW="https://raw.githubusercontent.com/ApexZ3R0/Dynamic-lists-for-podkop/main"
+REPO_RAW="https://raw.githubusercontent.com/ApexZ3R0/Auto-add-domains-and-IPs-to-Podkop/main"
 BASE_DIR="/etc/podkop-monitor"
 BIN_DIR="/usr/bin"
 CONF="$BASE_DIR/podkop-monitor.conf"
@@ -375,7 +375,7 @@ print_summary() {
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 say "podkop-monitor — установка"
-say "https://github.com/ApexZ3R0/Dynamic-lists-for-podkop"
+say "https://github.com/ApexZ3R0/Auto-add-domains-and-IPs-to-Podkop"
 
 check_deps
 choose_wan
