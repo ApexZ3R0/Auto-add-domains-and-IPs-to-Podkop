@@ -1,63 +1,58 @@
-# Dynamic lists for podkop
+# Auto-add domains and IPs to Podkop
+
+> [English version](README.en.md)
 
 Автоматическое обнаружение заблокированных ресурсов и добавление их в обход через [podkop](https://github.com/itdoginfo/podkop) на OpenWrt.
 
 ## Как работает
 
 ```
-cron каждые 5 минут:
-  curl --interface eth1 (белый РФ IP) → кандидат
+dns-monitor (cron каждые 5 минут):
+  Парсит DNS логи dnsmasq → находит новые домены
+  Проверяет TCP 443/80 через eth1 (белый РФ IP)
+  └── недоступен → добавить в кандидаты (manual.txt)
+
+blockcheck (cron каждые 5 минут):
+  curl через eth1 → кандидат
   ├── OK → сбросить счётчик неудач
-  └── FAIL × 3 подряд → SSH → VPS в Германии → ping
+  └── FAIL × 3 подряд → SSH → VPS → ping
         ├── ping OK → заблокирован провайдером
-        │     → uci add_list user_domains → podkop reload
+        │     → записать в auto-domains.lst / auto-subnets.lst
+        │     → podkop reload
         └── ping FAIL → сервер глобально недоступен, пропуск
 
-cron 04:30 МСК ежедневно:
+cleancheck (cron 04:30 МСК ежедневно):
   для каждого auto_added:
-    curl --interface eth1 → OK × 3 ночи подряд
-    → удалить из podkop UCI → podkop reload
+    curl через eth1 → OK × 3 ночи подряд
+    → удалить из auto-domains.lst / auto-subnets.lst
+    → podkop reload
 ```
 
-**Ключевая особенность:** проверки идут строго через `eth1` (WAN с белым IP), а не через VPN-туннели устройств — это исключает ложные срабатывания когда ты включаешь VPN на телефоне и заходишь на заблокированный сайт.
+**Ключевые особенности:**
+- Проверки идут строго через `eth1` (WAN с белым IP) — исключает ложные срабатывания от VPN на устройствах
+- Домены и IP пишутся в локальные файлы которые podkop читает напрямую — ручные списки не трогаются
+- dns-monitor автоматически подхватывает домены к которым устройства в сети пытаются подключиться
 
 ## Установка
 
 ```sh
-sh <(wget -O - https://raw.githubusercontent.com/ApexZ3R0/Dynamic-lists-for-podkop/main/install.sh)
+wget -O /tmp/install.sh https://raw.githubusercontent.com/ApexZ3R0/Auto-add-domains-and-IPs-to-Podkop/main/install.sh && sh /tmp/install.sh
 ```
 
 Скрипт задаст несколько вопросов:
 - WAN-интерфейс (по умолчанию `eth1`)
 - SSH-цель VPS для ping-проверки
-- Имя секции podkop для добавления доменов
+- Имя секции podkop
 - Пороги срабатывания
 
-Если у тебя секция в `text`-режиме (как `user_domains_text`) — install.sh автоматически мигрирует все текущие записи в UCI dynamic-формат с бэкапом.
-
-## Восстановление после обновления OpenWrt
-
-```sh
-# 1. Переустановить podkop-monitor
-sh <(wget -O - https://raw.githubusercontent.com/ApexZ3R0/Dynamic-lists-for-podkop/main/install.sh)
-
-# 2. Конфиг /etc/podkop-monitor/podkop-monitor.conf восстанавливается из репо
-#    или можно скопировать вручную из бэкапа перед обновлением:
-#    scp root@router:/etc/podkop-monitor/podkop-monitor.conf ./
-
-# 3. Списки кандидатов:
-#    scp root@router:/etc/podkop-monitor/manual.txt ./
-```
-
-> При обновлении OpenWrt `/etc/` очищается. Рекомендую перед обновлением:
-> ```sh
-> tar czf podkop-monitor-backup.tar.gz /etc/podkop-monitor/
-> ```
+После установки добавь в podkop локальные файлы (Services → Podkop → секция → Локальные списки):
+- **Локальные списки доменов:** `/etc/podkop-monitor/auto-domains.lst`
+- **Локальные списки подсетей:** `/etc/podkop-monitor/auto-subnets.lst`
 
 ## Управление
 
 ```sh
-# Добавить сайт в мониторинг (blockcheck будет проверять)
+# Добавить сайт в мониторинг
 podkop-manage add candidate filmix.ac
 
 # Добавить напрямую в podkop (без ожидания 3 неудач)
@@ -67,61 +62,62 @@ podkop-manage add ip 1.2.3.0/24
 # Проверить сайт прямо сейчас
 podkop-manage check filmix.ac
 
-# Посмотреть все состояния
+# Посмотреть состояние мониторинга
 podkop-manage list state
-
-# Статус конкретного хоста
-podkop-manage status filmix.ac
 
 # Удалить из podkop и вернуть в мониторинг
 podkop-manage remove domain filmix.ac
 
-# Добавить remote-источник кандидатов
-podkop-manage source add https://example.com/blocked-list.txt
-
-# Сбросить счётчик неудач (false positive)
+# Сбросить счётчик неудач
 podkop-manage reset filmix.ac
+```
+
+## Просмотр автодобавленных записей
+
+```sh
+cat /etc/podkop-monitor/auto-domains.lst
+cat /etc/podkop-monitor/auto-subnets.lst
+podkop-manage list state
 ```
 
 ## Структура файлов
 
 ```
 /etc/podkop-monitor/
-├── podkop-monitor.conf   # конфиг (WAN iface, VPS, пороги, секция podkop)
-├── blockcheck.sh         # проверка кандидатов (cron 5 мин)
-├── cleancheck.sh         # ночная очистка (cron 04:30 МСК)
-├── migrate-to-dynamic.sh # одноразовая миграция text→dynamic UCI
-├── manual.txt            # ручные кандидаты для мониторинга
-├── state.db              # счётчики неудач и статусы
-├── clean.db              # счётчики ночей доступности напрямую
-├── remote-sources.txt    # URL удалённых списков кандидатов
-└── candidates.d/         # загруженные remote-списки
-    └── remote_1.txt
+├── podkop-monitor.conf    # конфиг
+├── blockcheck.sh          # проверка кандидатов (cron 5 мин)
+├── cleancheck.sh          # ночная очистка (cron 04:30 МСК)
+├── dns-monitor.sh         # автодобавление из DNS логов (cron 5 мин)
+├── manual.txt             # ручные кандидаты
+├── auto-domains.lst       # → podkop: Локальные списки доменов
+├── auto-subnets.lst       # → podkop: Локальные списки подсетей
+├── state.db               # счётчики и статусы
+├── clean.db               # счётчики ночей доступности
+└── remote-sources.txt     # URL удалённых списков
 ```
 
 ## Логи
 
 ```sh
-logread | grep blockcheck    # события проверки
-logread | grep cleancheck    # ночная очистка
-logread | grep "ADDED"       # что добавилось
-logread | grep "REMOVED"     # что удалилось
-logread | grep "SUSPECT"     # подозрительные (накапливают счётчик)
+logread | grep blockcheck     # события проверки
+logread | grep cleancheck     # ночная очистка
+logread | grep dns-monitor    # автодобавление из DNS
+logread | grep "ADDED"        # что добавилось
+logread | grep "REMOVED"      # что удалилось
 ```
 
-## Статусы в state.db
+## Другие скрипты репозитория
 
-| Статус | Описание |
+| Ветка | Назначение |
 |---|---|
-| `watching` | В мониторинге, счётчик чистый |
-| `watching` + fails > 0 | Накапливает неудачи (красный в `list state`) |
-| `auto_added` | Добавлен автоматически, проверяется ночью |
-| `manual` | Добавлен вручную, не трогается cleancheck |
+| [Интерактивная-установка-дополнений](../../tree/Интерактивная-установка-дополнений) | Установка AmneziaWG + podkop + dynamic lists |
+| [Доустановка-пакетов-и-настроек-после-обновления-с-OpenWRT-24.x-на-25.x](../../tree/Доустановка-пакетов-и-настроек-после-обновления-с-OpenWRT-24.x-на-25.x) | Восстановление после обновления OpenWrt 25.x |
 
 ## Требования
 
-- OpenWrt 24.10+
-- podkop 0.7.x с секцией в `dynamic`-режиме
-- `curl`, `ssh` (openssh-client), `nslookup`
+- OpenWrt 24.10+ или 25.x
+- podkop 0.7.x
+- `curl`, `ssh`, `nslookup`
 - SSH-ключ до VPS (без пароля)
-- VPS с доступом в интернет (для ping-проверки)
+- VPS с доступом в интернет
+- Включённое логирование dnsmasq (`logqueries=1`)

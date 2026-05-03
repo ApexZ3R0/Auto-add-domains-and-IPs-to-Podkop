@@ -1,4 +1,4 @@
-# Dynamic lists for podkop
+# Auto-add domains and IPs to Podkop
 
 > [Русская версия](README.md)
 
@@ -7,130 +7,117 @@ Automatic detection of blocked resources and adding them to bypass via [podkop](
 ## How it works
 
 ```
-cron every 5 minutes:
-  curl --interface eth1 (clean WAN IP) → candidate
-  ├── OK → reset fail counter
-  └── FAIL × 3 in a row → SSH → overseas VPS → ping
-        ├── ping OK → blocked by ISP
-        │     → uci add_list user_domains → podkop reload
-        └── ping FAIL → server is globally unavailable, skip
+dns-monitor (cron every 5 minutes):
+  Parses dnsmasq DNS logs → finds new domains
+  Checks TCP 443/80 via eth1 (clean WAN IP)
+  └── unreachable → add to candidates (manual.txt)
 
-cron daily at 01:30 UTC:
+blockcheck (cron every 5 minutes):
+  curl via eth1 → candidate
+  ├── OK → reset fail counter
+  └── FAIL × 3 in a row → SSH → VPS → ping
+        ├── ping OK → blocked by ISP
+        │     → write to auto-domains.lst / auto-subnets.lst
+        │     → podkop reload
+        └── ping FAIL → server globally unavailable, skip
+
+cleancheck (cron daily at 01:30 UTC):
   for each auto_added entry:
-    curl --interface eth1 → OK × 3 nights in a row
-    → remove from podkop UCI → podkop reload
+    curl via eth1 → OK × 3 nights in a row
+    → remove from auto-domains.lst / auto-subnets.lst
+    → podkop reload
 ```
 
-**Key feature:** all checks go strictly through the WAN interface with a clean IP, bypassing any VPN tunnels — this eliminates false positives when a device on your network connects via VPN and accesses a blocked site.
+**Key features:**
+- All checks go strictly through `eth1` (WAN with clean IP) — eliminates false positives from VPN on devices
+- Domains and IPs are written to local files that podkop reads directly — manual lists are not touched
+- dns-monitor automatically picks up domains that devices on the network try to connect to
 
-## Quick install
+## Installation
 
 ```sh
-sh <(wget -O - https://raw.githubusercontent.com/ApexZ3R0/Dynamic-lists-for-podkop/main/install.sh)
+wget -O /tmp/install.sh https://raw.githubusercontent.com/ApexZ3R0/Auto-add-domains-and-IPs-to-Podkop/main/install.sh && sh /tmp/install.sh
 ```
 
-The script will ask a few questions:
+The script will ask:
 - WAN interface (default: `eth1`)
 - SSH target for overseas VPS (for ping verification)
-- podkop section name to add domains to
+- podkop section name
 - Fail/clean thresholds
 
-If your section is in `text` mode (e.g. `user_domains_text`), install.sh will automatically migrate all existing entries to UCI dynamic format with a backup.
+After installation, add local files to podkop (Services → Podkop → section → Local lists):
+- **Local domain lists:** `/etc/podkop-monitor/auto-domains.lst`
+- **Local subnet lists:** `/etc/podkop-monitor/auto-subnets.lst`
 
 ## Management
 
 ```sh
-# Add a site to monitoring (blockcheck will watch it)
-podkop-manage add candidate example.com
+# Add a site to monitoring
+podkop-manage add candidate filmix.ac
 
 # Add directly to podkop (without waiting for 3 failures)
-podkop-manage add domain example.com
+podkop-manage add domain filmix.ac
 podkop-manage add ip 1.2.3.0/24
 
 # Check a site right now
-podkop-manage check example.com
+podkop-manage check filmix.ac
 
 # Show all states
 podkop-manage list state
 
-# Status of a specific host
-podkop-manage status example.com
-
 # Remove from podkop and return to monitoring
-podkop-manage remove domain example.com
-
-# Add a remote candidate source
-podkop-manage source add https://example.com/blocked-list.txt
+podkop-manage remove domain filmix.ac
 
 # Reset fail counter (false positive)
-podkop-manage reset example.com
+podkop-manage reset filmix.ac
+```
+
+## View auto-added entries
+
+```sh
+cat /etc/podkop-monitor/auto-domains.lst
+cat /etc/podkop-monitor/auto-subnets.lst
+podkop-manage list state
 ```
 
 ## File structure
 
 ```
 /etc/podkop-monitor/
-├── podkop-monitor.conf   # config (WAN iface, VPS, thresholds, podkop section)
-├── blockcheck.sh         # candidate checker (cron every 5 min)
-├── cleancheck.sh         # nightly cleanup (cron 01:30 UTC)
-├── migrate-to-dynamic.sh # one-time migration text→dynamic UCI
-├── manual.txt            # manually added monitoring candidates
-├── state.db              # fail counters and statuses
-├── clean.db              # nightly direct-access counters
-├── remote-sources.txt    # URLs of remote candidate lists
-└── candidates.d/         # downloaded remote lists
-    └── remote_1.txt
+├── podkop-monitor.conf    # config
+├── blockcheck.sh          # candidate checker (cron every 5 min)
+├── cleancheck.sh          # nightly cleanup (cron 01:30 UTC)
+├── dns-monitor.sh         # auto-add from DNS logs (cron every 5 min)
+├── manual.txt             # manual candidates
+├── auto-domains.lst       # → podkop: Local domain lists
+├── auto-subnets.lst       # → podkop: Local subnet lists
+├── state.db               # counters and statuses
+├── clean.db               # nightly direct-access counters
+└── remote-sources.txt     # remote candidate list URLs
 ```
 
 ## Logs
 
 ```sh
-logread | grep blockcheck    # check events
-logread | grep cleancheck    # nightly cleanup
-logread | grep "ADDED"       # what was added
-logread | grep "REMOVED"     # what was removed
-logread | grep "SUSPECT"     # accumulating fail count
+logread | grep blockcheck     # check events
+logread | grep cleancheck     # nightly cleanup
+logread | grep dns-monitor    # auto-add from DNS
+logread | grep "ADDED"        # what was added
+logread | grep "REMOVED"      # what was removed
 ```
-
-## state.db statuses
-
-| Status | Description |
-|---|---|
-| `watching` | Monitored, clean counter |
-| `watching` + fails > 0 | Accumulating failures (shown in red in `list state`) |
-| `auto_added` | Added automatically, checked nightly |
-| `manual` | Added manually, ignored by cleancheck |
-
-## Recovery after OpenWrt upgrade
-
-```sh
-# 1. Reinstall podkop-monitor
-sh <(wget -O - https://raw.githubusercontent.com/ApexZ3R0/Dynamic-lists-for-podkop/main/install.sh)
-
-# 2. Config /etc/podkop-monitor/podkop-monitor.conf can be restored from the repo
-#    or copied manually from a backup made before the upgrade:
-#    scp root@router:/etc/podkop-monitor/podkop-monitor.conf ./
-
-# 3. Candidate lists:
-#    scp root@router:/etc/podkop-monitor/manual.txt ./
-```
-
-> OpenWrt upgrade wipes `/etc/`. It is recommended to back up before upgrading:
-> ```sh
-> tar czf podkop-monitor-backup.tar.gz /etc/podkop-monitor/
-> ```
 
 ## Other scripts in this repository
 
 | Branch | Purpose |
 |---|---|
-| [Interactive-add-ons-installer](../../tree/%D0%98%D0%BD%D1%82%D0%B5%D1%80%D0%B0%D0%BA%D1%82%D0%B8%D0%B2%D0%BD%D0%B0%D1%8F-%D1%83%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-%D0%B4%D0%BE%D0%BF%D0%BE%D0%BB%D0%BD%D0%B5%D0%BD%D0%B8%D0%B9) | Interactive installer: AmneziaWG + podkop + dynamic lists |
-| [Post-upgrade-OpenWRT-24.x-to-25.x](../../tree/%D0%94%D0%BE%D1%83%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-%D0%BF%D0%B0%D0%BA%D0%B5%D1%82%D0%BE%D0%B2-%D0%B8-%D0%BD%D0%B0%D1%81%D1%82%D1%80%D0%BE%D0%B5%D0%BA-%D0%BF%D0%BE%D1%81%D0%BB%D0%B5-%D0%BE%D0%B1%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D1%8F-%D1%81-OpenWRT-24.x-%D0%BD%D0%B0-25.x) | System recovery after OpenWrt 25.x upgrade |
+| [Interactive-add-ons-installer](../../tree/Интерактивная-установка-дополнений) | Install AmneziaWG + podkop + dynamic lists |
+| [Post-upgrade-OpenWRT-24.x-to-25.x](../../tree/Доустановка-пакетов-и-настроек-после-обновления-с-OpenWRT-24.x-на-25.x) | System recovery after OpenWrt 25.x upgrade |
 
 ## Requirements
 
-- OpenWrt 24.10+
-- podkop 0.7.x with a section in `dynamic` mode
-- `curl`, `ssh` (openssh-client), `nslookup`
+- OpenWrt 24.10+ or 25.x
+- podkop 0.7.x
+- `curl`, `ssh`, `nslookup`
 - SSH key to overseas VPS (passwordless)
-- VPS with internet access (for ping verification)
+- VPS with internet access
+- dnsmasq query logging enabled (`logqueries=1`)
