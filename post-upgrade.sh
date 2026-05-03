@@ -1,9 +1,9 @@
 #!/bin/sh
-# post-upgrade.sh — восстановление OpenWrt-роутера после обновления на OpenWrt 25.x
+# post-upgrade.sh — восстановление NanoPi R6S после обновления OpenWrt 25.x
 # Использует apk (не opkg)
 
 LOG="/tmp/post-upgrade.log"
-# exec disabled for busybox
+exec >> "$LOG" 2>&1
 
 RED='\033[0;31m'; GRN='\033[0;32m'; YLW='\033[0;33m'; BLD='\033[1m'; NC='\033[0m'
 say()  { printf "${BLD}>>> %s${NC}\n" "$*" | tee /dev/stderr; }
@@ -148,7 +148,7 @@ install_argon() {
 # ── podkop-monitor ────────────────────────────────────────────────────────────
 install_podkop_monitor() {
     say "podkop-monitor..."
-    REPO="https://raw.githubusercontent.com/ApexZ3R0/Dynamic-lists-for-podkop/main"
+    REPO="https://raw.githubusercontent.com/ApexZ3R0/Auto-add-domains-and-IPs-to-Podkop/main"
     if [ -f /etc/podkop-monitor/podkop-monitor.conf ]; then
         ok "Конфиг найден — обновляю скрипты"
         wget -q "${REPO}/scripts/blockcheck.sh?$(date +%s)" \
@@ -190,8 +190,57 @@ start_services() {
     done
 }
 
+
+# ── Бот и AWG sync ───────────────────────────────────────────────────────────
+restore_bot_and_awg() {
+    say "Восстановление бота и AWG sync..."
+
+    # awg_sync.sh — маршруты для клиентов AWG сервера
+    if [ ! -f /usr/bin/awg_sync.sh ]; then
+        cat > /usr/bin/awg_sync.sh << 'AWGSYNC'
+#!/bin/sh
+IFACE="awg_server"
+awg show "$IFACE" allowed-ips 2>/dev/null | while read -r pubkey ip; do
+    [ -z "$ip" ] && continue
+    ip route add "$ip" dev "$IFACE" 2>/dev/null || true
+done
+AWGSYNC
+        chmod +x /usr/bin/awg_sync.sh
+        ok "awg_sync.sh создан"
+    fi
+
+    # router_bot_daemon.sh — непрерывный опрос каждые 2 сек
+    cat > /usr/bin/router_bot_daemon.sh << 'BOTDAEMON'
+#!/bin/sh
+PIDFILE="/tmp/router_bot.pid"
+if [ -f "$PIDFILE" ] && kill -0 "$(cat $PIDFILE)" 2>/dev/null; then
+    exit 0
+fi
+echo $$ > "$PIDFILE"
+trap 'rm -f "$PIDFILE"' EXIT
+while true; do
+    /usr/bin/router_bot.sh >/dev/null 2>&1
+    sleep 2
+done
+BOTDAEMON
+        chmod +x /usr/bin/router_bot_daemon.sh
+        ok "router_bot_daemon.sh создан"
+
+    # Добавить в sysupgrade.conf
+    grep -qF "awg_sync" /etc/sysupgrade.conf || echo "/usr/bin/awg_sync.sh" >> /etc/sysupgrade.conf
+    grep -qF "router_bot_daemon" /etc/sysupgrade.conf || echo "/usr/bin/router_bot_daemon.sh" >> /etc/sysupgrade.conf
+
+    # Запустить бота если не запущен
+    if [ -f /usr/bin/router_bot.sh ]; then
+        kill $(cat /tmp/router_bot.pid 2>/dev/null) 2>/dev/null || true
+        sleep 1
+        /usr/bin/router_bot_daemon.sh &
+        ok "Бот запущен"
+    fi
+}
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
-say "post-upgrade.sh — OpenWrt 25.x"
+say "post-upgrade.sh — NanoPi R6S"
 say "$(date)"
 line
 
@@ -222,5 +271,5 @@ setup_cron
 start_services
 
 line
-say "Готово!"
+say "Готово! Лог: $LOG"
 line
