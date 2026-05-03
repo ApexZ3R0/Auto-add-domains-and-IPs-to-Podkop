@@ -1,7 +1,7 @@
 #!/bin/sh
 # setup.sh — универсальный установщик AmneziaWG + podkop для OpenWrt
 # Поддерживает OpenWrt 24.x (opkg) и 25.x (apk)
-# Репо: https://github.com/ApexZ3R0/Dynamic-lists-for-podkop
+# Репо: https://github.com/ApexZ3R0/Auto-add-domains-and-IPs-to-Podkop
 
 GRN='\033[0;32m'; YLW='\033[0;33m'; RED='\033[0;31m'; BLD='\033[1m'; NC='\033[0m'
 say()  { printf "\n${BLD}%s${NC}\n" "$*"; }
@@ -43,6 +43,7 @@ check_storage() {
     ok "Диск: ${ROOT_FREE_MB}MB свободно из ${ROOT_TOTAL_MB}MB"
     ok "RAM: ${RAM_FREE}MB доступно"
 
+    # Предупреждения по памяти
     if [ "$ROOT_FREE_MB" -lt 10 ]; then
         err "Критически мало места на диске (${ROOT_FREE_MB}MB)!"
         warn "Рекомендуется расширить раздел перед установкой"
@@ -80,6 +81,7 @@ install_pkg() {
 
 # ── DNS fix ───────────────────────────────────────────────────────────────────
 fix_dns() {
+    # Проверить доступность интернета
     if ! ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
         warn "Нет связи с интернетом — пробую исправить DNS"
         echo "nameserver 8.8.8.8" > /etc/resolv.conf
@@ -97,12 +99,14 @@ install_amneziawg() {
     install_pkg amneziawg-tools
     install_pkg kmod-amneziawg
 
+    # luci-proto-amneziawg — из внешнего репо
     if $PKG_CHECK luci-proto-amneziawg >/dev/null 2>&1; then
         ok "Уже установлен: luci-proto-amneziawg"
     else
         warn "Скачиваю luci-proto-amneziawg..."
         wget -q -O /tmp/awg-install.sh \
             https://raw.githubusercontent.com/Slava-Shchipunov/awg-openwrt/refs/heads/master/amneziawg-install.sh
+        # Передаём 'n' чтобы не настраивал интерфейс
         printf "n\nn\n" | sh /tmp/awg-install.sh >/dev/null 2>&1
         rm -f /tmp/awg-install.sh
         $PKG_CHECK luci-proto-amneziawg >/dev/null 2>&1 \
@@ -120,6 +124,7 @@ install_podkop() {
     sh /tmp/podkop-install.sh
     rm -f /tmp/podkop-install.sh
 
+    # sing-box-extended нужен для xhttp транспорта
     if sing-box version 2>/dev/null | grep -q "extended"; then
         ok "sing-box-extended уже установлен"
     else
@@ -136,7 +141,7 @@ install_podkop() {
 install_dynamic_lists() {
     say "Установка dynamic lists для podkop..."
     wget -q -O /tmp/dl-install.sh \
-        https://raw.githubusercontent.com/ApexZ3R0/Dynamic-lists-for-podkop/main/install.sh
+        https://raw.githubusercontent.com/ApexZ3R0/Auto-add-domains-and-IPs-to-Podkop/main/install.sh
     sh /tmp/dl-install.sh
     rm -f /tmp/dl-install.sh
 }
@@ -180,6 +185,7 @@ install_extras() {
     install_pkg luci-mod-rpc
     install_pkg luci-app-samba4
 
+    # luci-theme-argon — только если достаточно места
     if [ "$STORAGE_LIMITED" -eq 0 ]; then
         if $PKG_CHECK luci-theme-argon >/dev/null 2>&1; then
             ok "Уже установлен: luci-theme-argon"
@@ -212,6 +218,7 @@ interactive_menu() {
     echo "    3) Dynamic lists (автодобавление заблокированных доменов)"
     echo "    4) Мониторинг (banip, vnstat, netdata, collectd)"
     echo "    5) Утилиты (git, rclone, nano, argon, pbr...)"
+    echo "    6) Вспомогательные скрипты (awg_sync, bot_daemon)"
     echo ""
     echo "  Пресеты:"
     echo "    a) Базовый (1+2)"
@@ -242,11 +249,13 @@ interactive_menu() {
                 warn "Введи 1-5 или a/b/c"
                 continue ;;
         esac
+        # При ручном выборе спрашиваем продолжать или выбрать ещё
         ask "Добавить ещё? [y/N]:"
         read -r more
         [ "$more" != "y" ] && [ "$more" != "Y" ] && break
     done
 
+    # Если мало места — предупредить
     if [ "${STORAGE_LIMITED:-0}" -eq 1 ]; then
         [ "${DO_EXTRAS:-0}" -eq 1 ] && warn "Мало места — extras могут не поместиться"
         [ "${DO_MONITORING:-0}" -eq 1 ] && warn "Мало места — netdata будет пропущен"
@@ -265,10 +274,51 @@ interactive_menu() {
     [ "$confirm" = "n" ] || [ "$confirm" = "N" ] && { warn "Отменено."; exit 0; }
 }
 
+
+# ── МОДУЛЬ 6: Бот и AWG sync ─────────────────────────────────────────────────
+setup_bot_helpers() {
+    say "Настройка вспомогательных скриптов..."
+
+    # awg_sync.sh
+    cat > /usr/bin/awg_sync.sh << 'AWGSYNC'
+#!/bin/sh
+IFACE="awg_server"
+awg show "$IFACE" allowed-ips 2>/dev/null | while read -r pubkey ip; do
+    [ -z "$ip" ] && continue
+    ip route add "$ip" dev "$IFACE" 2>/dev/null || true
+done
+AWGSYNC
+    chmod +x /usr/bin/awg_sync.sh
+    ok "awg_sync.sh создан"
+
+    # router_bot_daemon.sh — опрос каждые 2 сек
+    cat > /usr/bin/router_bot_daemon.sh << 'BOTDAEMON'
+#!/bin/sh
+PIDFILE="/tmp/router_bot.pid"
+if [ -f "$PIDFILE" ] && kill -0 "$(cat $PIDFILE)" 2>/dev/null; then
+    exit 0
+fi
+echo $$ > "$PIDFILE"
+trap 'rm -f "$PIDFILE"' EXIT
+while true; do
+    /usr/bin/router_bot.sh >/dev/null 2>&1
+    sleep 2
+done
+BOTDAEMON
+    chmod +x /usr/bin/router_bot_daemon.sh
+    ok "router_bot_daemon.sh создан"
+
+    # Прописать в sysupgrade.conf
+    [ -f /etc/sysupgrade.conf ] && {
+        grep -qF "awg_sync" /etc/sysupgrade.conf || echo "/usr/bin/awg_sync.sh" >> /etc/sysupgrade.conf
+        grep -qF "router_bot_daemon" /etc/sysupgrade.conf || echo "/usr/bin/router_bot_daemon.sh" >> /etc/sysupgrade.conf
+    }
+}
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 line
 say "  OpenWrt Setup — AmneziaWG + podkop"
-say "  https://github.com/ApexZ3R0/Dynamic-lists-for-podkop"
+say "  https://github.com/ApexZ3R0/Auto-add-domains-and-IPs-to-Podkop"
 line
 
 detect_pkg_manager
@@ -283,13 +333,14 @@ interactive_menu
 [ "${DO_DYNLISTS:-0}"   -eq 1 ] && install_dynamic_lists
 [ "${DO_MONITORING:-0}" -eq 1 ] && install_monitoring
 [ "${DO_EXTRAS:-0}"     -eq 1 ] && install_extras
+[ "${DO_EXTRAS:-0}"     -eq 1 ] && setup_bot_helpers
 
 line
 say "  Установка завершена!"
 line
 echo ""
 echo "Следующие шаги:"
-[ "${DO_AWG:-0}"      -eq 1 ] && echo "  • Настрой AmneziaWG: Network → Interfaces → awg"
-[ "${DO_PODKOP:-0}"   -eq 1 ] && echo "  • Настрой podkop: Services → Podkop"
+[ "${DO_AWG:-0}"    -eq 1 ] && echo "  • Настрой AmneziaWG: Network → Interfaces → awg"
+[ "${DO_PODKOP:-0}" -eq 1 ] && echo "  • Настрой podkop: Services → Podkop"
 [ "${DO_DYNLISTS:-0}" -eq 1 ] && echo "  • Добавь кандидатов: podkop-manage add candidate site.com"
 echo ""
