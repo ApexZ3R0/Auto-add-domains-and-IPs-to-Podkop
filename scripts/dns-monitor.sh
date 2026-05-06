@@ -1,8 +1,5 @@
 #!/bin/sh
-# dns-monitor.sh — автодобавление доменов в кандидаты blockcheck
-# Парсит логи dnsmasq, проверяет доступность через WAN и VPS
-# Запускается по cron каждые 5 минут
-
+# dns-monitor.sh — добавляет в кандидаты только недоступные домены
 BASE_DIR="/etc/podkop-monitor"
 MANUAL="$BASE_DIR/manual.txt"
 STATE_DB="$BASE_DIR/state.db"
@@ -12,16 +9,14 @@ CONF="$BASE_DIR/podkop-monitor.conf"
 [ -f "$CONF" ] && . "$CONF"
 WAN_IFACE="${WAN_IFACE:-eth1}"
 CURL_TIMEOUT="${CURL_TIMEOUT:-8}"
-VPS_HOST="${VPS_HOST:-root@vps}"
-VPS_SSH_TIMEOUT="${VPS_SSH_TIMEOUT:-15}"
 
 log() { logger -t "$LOG_TAG" "$*"; }
 
-# Исключить служебные домены по префиксу
+
 is_excluded_prefix() {
     domain="$1"
     echo "$domain" | grep -qiE \
-        '^(imap|smtp|mail|pop|pop3|ntp|time|clock|push|apns|mtalk|stun|turn|voip|sip|mqtt|iot-mqtt|ocsp|crl|pki|certs|telemetry|metrics|analytics|stats?|logs?|logging|supl|geo|gps|loc)\.' \
+        '^(imap|smtp|mail|pop|pop3|ntp|time|clock|push|apns|mtalk|stun|turn|voip|sip|mqtt|iot-mqtt|ocsp|crl|pki|certs|telemetry|metrics|analytics|stat[s]?|logs?|logging|supl|geo|gps|loc)\.' \
         && return 0
     echo "$domain" | grep -qiE \
         '\.(akamai\.net|fastly\.net|samsungotn\.net|samsungcloudsolution\.net|pool\.ntp\.org)$' \
@@ -35,9 +30,8 @@ already_known() {
     domain="$1"
     grep -qxF "$domain" "$MANUAL" 2>/dev/null && return 0
     grep -q "^$domain " "$STATE_DB" 2>/dev/null && return 0
-    uci get podkop.AmneziaWG_Ultahost.user_domains_text 2>/dev/null \
-        | grep -qxF "$domain" && return 0
-    grep -qxF "$domain" "$BASE_DIR/auto-domains.lst" 2>/dev/null && return 0
+    uci get podkop.AmneziaWG_Ultahost.user_domains 2>/dev/null \
+        | tr ' ' '\n' | grep -qxF "$domain" && return 0
     return 1
 }
 
@@ -66,8 +60,8 @@ probe_wan() {
 mkdir -p "$BASE_DIR"
 touch "$MANUAL" "$SEEN_FILE"
 
-logread | grep "dnsmasq" | grep "query\[A\]" | while IFS= read -r line; do
-    domain=$(echo "$line" | awk '{for(i=1;i<=NF;i++) if($i=="query[A]") print $(i+1)}')
+logread | grep "dnsmasq" | grep -E "query\[A\]|query\[HTTPS\]" | while IFS= read -r line; do
+    domain=$(echo "$line" | awk '{for(i=1;i<=NF;i++) if($i=="query[A]"||$i=="query[HTTPS]") print $(i+1)}')
     domain=$(echo "$domain" | sed 's/\.$//')
     [ -z "$domain" ] && continue
     echo "$domain" | grep -qv '\.' && continue
@@ -81,13 +75,13 @@ logread | grep "dnsmasq" | grep "query\[A\]" | while IFS= read -r line; do
     [ -z "$resolved" ] && continue
     is_fakeip "$resolved" && continue
 
-    # Проверяем доступность через WAN
+    # Проверяем доступность через WAN — добавляем только если недоступен
     if ! probe_wan "$domain"; then
         # Проверяем с VPS — если там тоже недоступен, это не блокировка
-        vps_ok=$(ssh -i /root/.ssh/id_rsa \
-            -o ConnectTimeout="$VPS_SSH_TIMEOUT" \
+        target="$resolved"
+        vps_ok=$(ssh -i /root/.ssh/id_rsa -o ConnectTimeout=10 \
             -o BatchMode=yes -o StrictHostKeyChecking=no \
-            "$VPS_HOST" "ping -c 2 -W 2 '$resolved' >/dev/null 2>&1 && echo ok" 2>/dev/null)
+            "$VPS_HOST" "timeout 3 bash -c \"echo >/dev/tcp/$target/443\" 2>/dev/null && echo ok || echo fail" 2>/dev/null)
         if [ "$vps_ok" = "ok" ]; then
             echo "$domain" >> "$MANUAL"
             log "AUTO-CANDIDATE: $domain ($resolved) — недоступен локально, доступен с VPS"
