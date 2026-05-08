@@ -18,7 +18,7 @@ is_excluded_prefix() {
         '^(imap|smtp|mail|pop|pop3|ntp|time|clock|push|apns|mtalk|stun|turn|voip|sip|mqtt|iot-mqtt|ocsp|crl|pki|certs|telemetry|metrics|analytics|stats?|logs?|logging|supl|geo|gps|loc)\.' \
         && return 0
     echo "$domain" | grep -qiE \
-        '\.(akamai\.net|fastly\.net|samsungotn\.net|samsungcloudsolution\.net|pool\.ntp\.org)$' \
+        '\.(akamai\.net|akamaiedge\.net|akamaihd\.net|akadns\.net|edgesuite\.net|fastly\.net|aaplimg\.com|apple-dns\.net|samsungotn\.net|samsungcloudsolution\.net|pool\.ntp\.org|cloudapp\.azure\.com|azurewebsites\.net)$' \
         && return 0
     return 1
 }
@@ -108,16 +108,17 @@ logread | grep "dnsmasq" | grep -E "query\[A\]|query\[HTTPS\]" | while IFS= read
 
     if ! probe_wan "$domain"; then
         log "BLOCKED locally: $domain ($resolved) — checking VPS"
-        target="$resolved"
-        vps_ok=$(ssh -i /root/.ssh/id_rsa -o ConnectTimeout=10 \
+        vps_code=$(ssh -i /root/.ssh/id_rsa -o ConnectTimeout=10 \
             -o BatchMode=yes -o StrictHostKeyChecking=no \
-            "$VPS_HOST" "timeout 3 bash -c \"echo >/dev/tcp/$target/443\" 2>/dev/null && echo ok || echo fail" 2>/dev/null)
-        if [ "$vps_ok" = "ok" ]; then
-            echo "$domain" >> "$MANUAL"
-            log "AUTO-CANDIDATE: $domain ($resolved) — недоступен локально, доступен с VPS"
-        else
-            log "VPS-FAIL: $domain ($resolved) vps_ok=${vps_ok:-empty}"
-        fi
+            "$VPS_HOST" \
+            "curl -sL --max-redirs 3 --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' 'https://$domain/' 2>/dev/null" 2>/dev/null)
+        case "$vps_code" in
+            ""|"000"|"403")
+                log "VPS-SKIP: $domain — VPS also gets ${vps_code:-empty}, not geo-restriction" ;;
+            *)
+                echo "$domain" >> "$MANUAL"
+                log "AUTO-CANDIDATE: $domain ($resolved) — local blocked, VPS gets $vps_code" ;;
+        esac
     else
         log "ACCESSIBLE: $domain — пропускаем"
     fi

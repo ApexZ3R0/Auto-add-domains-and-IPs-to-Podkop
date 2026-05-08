@@ -105,23 +105,18 @@ probe_wan() {
 }
 
 # ── Ping с VPS через SSH ───────────────────────────────────────────────────────
-probe_vps_tcp() {
+probe_vps_http() {
     host="$1"
-    if is_ip "$host"; then
-        target="$host"
-    else
-        target=$(nslookup "$host" "$DNS_TRUSTED" 2>/dev/null \
-            | awk '/^Address/{print $2}' | grep -v ':' | grep -v '^127\.' | head -1)
-        [ -z "$target" ] && { log "VPS TCP SKIP $host: не резолвится"; return 1; }
-    fi
-
-    result=$(ssh -i "$SSH_KEY" -o ConnectTimeout="$VPS_SSH_TIMEOUT" \
+    vps_code=$(ssh -i "$SSH_KEY" -o ConnectTimeout="$VPS_SSH_TIMEOUT" \
         -o StrictHostKeyChecking=no \
         -o BatchMode=yes \
         "$VPS_HOST" \
-        "timeout 3 bash -c \"echo >/dev/tcp/$target/443\" 2>/dev/null && echo ok || echo fail" \
+        "curl -sL --max-redirs 3 --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' 'https://$host/' 2>/dev/null" \
         2>/dev/null)
-    [ "$result" = "ok" ]
+    case "$vps_code" in
+        ""|"000"|"403") return 1 ;;
+        *) return 0 ;;
+    esac
 }
 
 # ── Добавить в podkop ─────────────────────────────────────────────────────────
@@ -192,15 +187,14 @@ check_host() {
     log "SUSPECT $host: consecutive_fails=$consec/$FAIL_THRESHOLD"
 
     if [ "$consec" -ge "$FAIL_THRESHOLD" ]; then
-        log "Threshold reached for $host — проверяю VPS ping..."
-        if probe_vps_tcp "$host"; then
-            log "VPS TCP OK: $host — добавляю в podkop"
+        log "Threshold reached for $host — проверяю VPS HTTP..."
+        if probe_vps_http "$host"; then
+            log "VPS HTTP OK: $host — добавляю в podkop"
             add_to_podkop "$host"
             /etc/init.d/podkop reload 2>/dev/null || true
             log "podkop reload после добавления $host"
         else
-            log "VPS TCP FAIL: $host — сервер глобально недоступен, пропускаю"
-            # Сбрасываем счётчик — это не блокировка
+            log "VPS HTTP FAIL: $host — VPS тоже не открывает, не геоблок"
             reset_fails "$host"
         fi
     fi
