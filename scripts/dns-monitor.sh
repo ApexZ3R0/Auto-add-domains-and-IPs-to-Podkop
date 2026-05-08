@@ -39,22 +39,30 @@ already_known() {
 
 probe_wan() {
     host="$1"
-    curl -s --max-redirs 0 \
+    http_code=$(curl -sL --max-redirs 5 \
         --interface "$WAN_IFACE" \
         --connect-timeout "$CURL_TIMEOUT" \
         --max-time $((CURL_TIMEOUT+3)) \
-        -o /dev/null \
-        "https://$host/" 2>/dev/null
+        -o /dev/null -w "%{http_code}" \
+        "https://$host/" 2>/dev/null)
     ec=$?
     case "$ec" in
-        0|22|35|56) return 0 ;;
-        7) curl -s --max-redirs 0 --interface "$WAN_IFACE" \
-               --connect-timeout "$CURL_TIMEOUT" \
-               --max-time $((CURL_TIMEOUT+3)) \
-               -o /dev/null "http://$host/" 2>/dev/null
-           ec2=$?
-           [ $ec2 -eq 0 ] || [ $ec2 -eq 22 ] || [ $ec2 -eq 35 ] && return 0
-           return 1 ;;
+        0) return 0 ;;
+        22) [ "$http_code" = "403" ] && return 1; return 0 ;;
+        7)
+            http_code=$(curl -sL --max-redirs 5 \
+                --interface "$WAN_IFACE" \
+                --connect-timeout "$CURL_TIMEOUT" \
+                --max-time $((CURL_TIMEOUT+3)) \
+                -o /dev/null -w "%{http_code}" \
+                "http://$host/" 2>/dev/null)
+            ec2=$?
+            case "$ec2" in
+                0) return 0 ;;
+                22) [ "$http_code" = "403" ] && return 1; return 0 ;;
+                *) return 1 ;;
+            esac ;;
+        35|56) return 0 ;;
         *) return 1 ;;
     esac
 }

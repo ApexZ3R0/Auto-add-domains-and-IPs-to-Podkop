@@ -77,29 +77,32 @@ is_ip() { echo "$1" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]+)?$'; }
 # ── Проверка через WAN (белый IP) ─────────────────────────────────────────────
 probe_wan() {
     host="$1"
-    # Пробуем порт 443 (HTTPS) и 80 (HTTP)
-    # Если хотя бы один отвечает — сервер доступен
-    # exit 0/35 = TCP работает, exit 7 = refused (но сервер ответил!), exit 28/6 = недоступен
-    for port in 443 80; do
-        if [ "$port" -eq 443 ]; then
-            url="https://$host/"
-        else
-            url="http://$host/"
-        fi
-        curl -s \
-            --max-redirs 0 \
-            --interface "$WAN_IFACE" \
-            --connect-timeout "$CURL_TIMEOUT" \
-            --max-time $((CURL_TIMEOUT+3)) \
-            -o /dev/null \
-            "$url" 2>/dev/null
-        ec=$?
-        case "$ec" in
-            0|35|22) return 0 ;;  # OK / SSL error / HTTP error — TCP работает
-            7)       return 0 ;;  # Connection refused — но TCP дошёл до сервера
-        esac
-    done
-    return 1  # Оба порта недоступны — заблокирован или не существует
+    http_code=$(curl -sL --max-redirs 5 \
+        --interface "$WAN_IFACE" \
+        --connect-timeout "$CURL_TIMEOUT" \
+        --max-time $((CURL_TIMEOUT+3)) \
+        -o /dev/null -w "%{http_code}" \
+        "https://$host/" 2>/dev/null)
+    ec=$?
+    case "$ec" in
+        0) return 0 ;;
+        22) [ "$http_code" = "403" ] && return 1; return 0 ;;
+        7)
+            http_code=$(curl -sL --max-redirs 5 \
+                --interface "$WAN_IFACE" \
+                --connect-timeout "$CURL_TIMEOUT" \
+                --max-time $((CURL_TIMEOUT+3)) \
+                -o /dev/null -w "%{http_code}" \
+                "http://$host/" 2>/dev/null)
+            ec2=$?
+            case "$ec2" in
+                0) return 0 ;;
+                22) [ "$http_code" = "403" ] && return 1; return 0 ;;
+                *) return 1 ;;
+            esac ;;
+        35|56) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # ── Ping с VPS через SSH ───────────────────────────────────────────────────────
