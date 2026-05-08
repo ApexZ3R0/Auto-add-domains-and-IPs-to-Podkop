@@ -26,15 +26,31 @@ is_ip() { echo "$1" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]+)?$'; }
 # ── Проверка через WAN ────────────────────────────────────────────────────────
 probe_wan() {
     host="$1"
-    curl -sf \
+    http_code=$(curl -sL --max-redirs 5 \
         --interface "$WAN_IFACE" \
         --connect-timeout "$CURL_TIMEOUT" \
         --max-time $((CURL_TIMEOUT+3)) \
-        -o /dev/null \
-        "https://$host/" 2>/dev/null
+        -o /dev/null -w "%{http_code}" \
+        "https://$host/" 2>/dev/null)
     ec=$?
-    [ "$ec" -eq 0 ] || [ "$ec" -eq 35 ] && return 0
-    return 1
+    [ "$http_code" = "403" ] && return 1
+    case "$ec" in
+        0|22|35|56) return 0 ;;
+        7)
+            http_code=$(curl -sL --max-redirs 5 \
+                --interface "$WAN_IFACE" \
+                --connect-timeout "$CURL_TIMEOUT" \
+                --max-time $((CURL_TIMEOUT+3)) \
+                -o /dev/null -w "%{http_code}" \
+                "http://$host/" 2>/dev/null)
+            ec2=$?
+            [ "$http_code" = "403" ] && return 1
+            case "$ec2" in
+                0|22|35) return 0 ;;
+                *) return 1 ;;
+            esac ;;
+        *) return 1 ;;
+    esac
 }
 
 # ── Счётчики clean_db ─────────────────────────────────────────────────────────

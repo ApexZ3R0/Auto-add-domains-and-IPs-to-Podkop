@@ -274,7 +274,7 @@ download_scripts() {
     touch "$BASE_DIR/manual.txt" "$BASE_DIR/state.db" \
           "$BASE_DIR/clean.db" "$BASE_DIR/remote-sources.txt"
 
-    for script in blockcheck.sh cleancheck.sh migrate-to-dynamic.sh; do
+    for script in blockcheck.sh cleancheck.sh dns-monitor.sh migrate-to-dynamic.sh; do
         if curl -sf "$REPO_RAW/scripts/$script" -o "$BASE_DIR/$script"; then
             chmod +x "$BASE_DIR/$script"
             ok "Загружен: $script"
@@ -344,6 +344,12 @@ setup_cron() {
         echo "*/5 * * * * $BASE_DIR/blockcheck.sh" >> "$CRON_FILE"
         ok "Cron: blockcheck каждые 5 минут"
     fi
+    if grep -qF "dns-monitor.sh" "$CRON_FILE" 2>/dev/null; then
+        ok "Cron dns-monitor уже настроен"
+    else
+        echo "*/5 * * * * $BASE_DIR/dns-monitor.sh" >> "$CRON_FILE"
+        ok "Cron: dns-monitor каждые 5 минут"
+    fi
     if grep -qF "cleancheck.sh" "$CRON_FILE" 2>/dev/null; then
         ok "Cron cleancheck уже настроен"
     else
@@ -361,7 +367,7 @@ print_summary() {
     line
     echo ""
     echo "Конфиг:  $CONF"
-    echo "Логи:    logread | grep blockcheck"
+    echo "Логи:    logread | grep -E 'blockcheck|dns-monitor|cleancheck'"
     echo ""
     say "Команды:"
     echo "  podkop-manage add candidate site.com   # в мониторинг"

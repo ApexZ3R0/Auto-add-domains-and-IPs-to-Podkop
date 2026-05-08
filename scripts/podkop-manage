@@ -32,6 +32,8 @@ MANUAL="$BASE_DIR/manual.txt"
 STATE_DB="$BASE_DIR/state.db"
 SOURCES_FILE="$BASE_DIR/remote-sources.txt"
 CANDIDATES_DIR="$BASE_DIR/candidates.d"
+OUT_DOMAINS="${OUT_DOMAINS:-$BASE_DIR/auto-domains.lst}"
+OUT_SUBNETS="${OUT_SUBNETS:-$BASE_DIR/auto-subnets.lst}"
 
 GRN='\033[0;32m'; YLW='\033[0;33m'; RED='\033[0;31m'; NC='\033[0m'
 ok()   { printf "${GRN}✓${NC} %s\n" "$*"; }
@@ -40,20 +42,6 @@ info() { printf "${YLW}→${NC} %s\n" "$*"; }
 
 is_ip() { echo "$1" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]+)?$'; }
 
-uci_has() {
-    uci get "podkop.$SECTION.$1" 2>/dev/null | tr ' ' '\n' | grep -qxF "$2"
-}
-
-uci_del_val() {
-    key="$1"; val="$2"
-    all=$(uci get "podkop.$SECTION.$key" 2>/dev/null)
-    uci delete "podkop.$SECTION.$key" 2>/dev/null || true
-    echo "$all" | tr ' ' '\n' | while IFS= read -r v; do
-        v=$(echo "$v" | tr -d "'\" \t\r\n")
-        [ -z "$v" ] || [ "$v" = "$val" ] && continue
-        uci add_list "podkop.$SECTION.$key=$v"
-    done
-}
 
 usage() { cat <<'EOF'
 podkop-manage — управление podkop-monitor
@@ -87,22 +75,22 @@ cmd_add() {
     [ -z "$host" ] && { err "укажи хост"; exit 1; }
     case "$type" in
         domain)
-            if uci_has "user_domains" "$host"; then
-                info "$host уже в user_domains"
+            if grep -qxF "$host" "$OUT_DOMAINS" 2>/dev/null; then
+                info "$host уже в $(basename "$OUT_DOMAINS")"
             else
-                uci add_list "podkop.$SECTION.user_domains=$host"
-                uci commit podkop
+                mkdir -p "$BASE_DIR"
+                echo "$host" >> "$OUT_DOMAINS"
                 tmp=$(mktemp)
                 grep -v "^$host " "$STATE_DB" > "$tmp" 2>/dev/null || true
                 echo "$host 0 0 manual" >> "$tmp"; mv "$tmp" "$STATE_DB"
                 ok "Добавлен домен: $host"
             fi ;;
         ip)
-            if uci_has "user_subnets" "$host"; then
-                info "$host уже в user_subnets"
+            if grep -qxF "$host" "$OUT_SUBNETS" 2>/dev/null; then
+                info "$host уже в $(basename "$OUT_SUBNETS")"
             else
-                uci add_list "podkop.$SECTION.user_subnets=$host"
-                uci commit podkop
+                mkdir -p "$BASE_DIR"
+                echo "$host" >> "$OUT_SUBNETS"
                 tmp=$(mktemp)
                 grep -v "^$host " "$STATE_DB" > "$tmp" 2>/dev/null || true
                 echo "$host 0 0 manual" >> "$tmp"; mv "$tmp" "$STATE_DB"
@@ -125,22 +113,25 @@ cmd_remove() {
     [ -z "$host" ] && { err "укажи хост"; exit 1; }
     case "$type" in
         domain)
-            uci_del_val "user_domains" "$host"
-            uci commit podkop
+            tmp=$(mktemp)
+            grep -vxF "$host" "$OUT_DOMAINS" > "$tmp" 2>/dev/null || true
+            mv "$tmp" "$OUT_DOMAINS"
             tmp=$(mktemp)
             grep -v "^$host " "$STATE_DB" > "$tmp" 2>/dev/null || true
             echo "$host 0 0 watching" >> "$tmp"; mv "$tmp" "$STATE_DB"
             ok "Удалён домен: $host" ;;
         ip)
-            uci_del_val "user_subnets" "$host"
-            uci commit podkop
+            tmp=$(mktemp)
+            grep -vxF "$host" "$OUT_SUBNETS" > "$tmp" 2>/dev/null || true
+            mv "$tmp" "$OUT_SUBNETS"
             tmp=$(mktemp)
             grep -v "^$host " "$STATE_DB" > "$tmp" 2>/dev/null || true
             echo "$host 0 0 watching" >> "$tmp"; mv "$tmp" "$STATE_DB"
             ok "Удалён IP: $host" ;;
         candidate)
-            grep -vxF "$host" "$MANUAL" > /tmp/mn.tmp 2>/dev/null || true
-            mv /tmp/mn.tmp "$MANUAL"
+            tmp=$(mktemp)
+            grep -vxF "$host" "$MANUAL" > "$tmp" 2>/dev/null || true
+            mv "$tmp" "$MANUAL"
             ok "Удалён кандидат: $host" ;;
         *) err "тип: domain | ip | candidate"; exit 1 ;;
     esac
@@ -149,13 +140,11 @@ cmd_remove() {
 cmd_list() {
     case "$1" in
         domains)
-            printf "\n${GRN}=== UCI user_domains ===${NC}\n"
-            uci get "podkop.$SECTION.user_domains" 2>/dev/null \
-                | tr ' ' '\n' | grep -v '^$' | sort || echo "(пусто)" ;;
+            printf "\n${GRN}=== Домены (%s) ===${NC}\n" "$OUT_DOMAINS"
+            sort "$OUT_DOMAINS" 2>/dev/null | grep -v '^$' || echo "(пусто)" ;;
         ips)
-            printf "\n${GRN}=== UCI user_subnets ===${NC}\n"
-            uci get "podkop.$SECTION.user_subnets" 2>/dev/null \
-                | tr ' ' '\n' | grep -v '^$' | sort || echo "(пусто)" ;;
+            printf "\n${GRN}=== Подсети (%s) ===${NC}\n" "$OUT_SUBNETS"
+            sort "$OUT_SUBNETS" 2>/dev/null | grep -v '^$' || echo "(пусто)" ;;
         candidates)
             printf "\n${GRN}=== Кандидаты ===${NC}\n"
             echo "--- manual.txt ---"
@@ -195,8 +184,8 @@ cmd_status() {
     echo "Неудач подряд: $(echo "$line" | awk '{print $2+0}')"
     echo "Всего добавлений: $(echo "$line" | awk '{print $3+0}')"
     echo "Статус:        $(echo "$line" | awk '{print $4}')"
-    uci_has "user_domains" "$host" && echo "В UCI:         user_domains ✓"
-    uci_has "user_subnets" "$host" && echo "В UCI:         user_subnets ✓"
+    grep -qxF "$host" "$OUT_DOMAINS" 2>/dev/null && echo "В domains.lst: ✓"
+    grep -qxF "$host" "$OUT_SUBNETS" 2>/dev/null && echo "В subnets.lst: ✓"
     grep -qxF "$host" "$MANUAL" 2>/dev/null && echo "Мониторинг:    manual.txt ✓"
 }
 
@@ -215,38 +204,64 @@ cmd_check() {
     host="$1"; [ -z "$host" ] && { err "укажи хост"; exit 1; }
     echo "Проверка: $host"
     echo -n "  WAN curl ($WAN_IFACE)... "
-    if curl -sf --interface "$WAN_IFACE" \
-            --connect-timeout "$CURL_TIMEOUT" \
-            --max-time $((CURL_TIMEOUT+3)) \
-            -o /dev/null "https://$host/" 2>/dev/null; then
-        printf "${GRN}OK${NC}\n"
-        return
+    http_code=$(curl -sL --max-redirs 5 \
+        --interface "$WAN_IFACE" \
+        --connect-timeout "$CURL_TIMEOUT" \
+        --max-time $((CURL_TIMEOUT+3)) \
+        -o /dev/null -w "%{http_code}" \
+        "https://$host/" 2>/dev/null)
+    ec=$?
+    if [ "$http_code" = "403" ]; then
+        printf "${RED}BLOCKED (HTTP 403)${NC}\n"
     else
-        ec=$?
-        [ "$ec" -eq 35 ] && { printf "${GRN}OK (SSL)${NC}\n"; return; }
-        printf "${RED}FAIL (exit $ec)${NC}\n"
+        case "$ec" in
+            0|22|35|56)
+                printf "${GRN}OK (HTTP $http_code)${NC}\n"
+                return ;;
+            7)
+                http_code=$(curl -sL --max-redirs 5 \
+                    --interface "$WAN_IFACE" \
+                    --connect-timeout "$CURL_TIMEOUT" \
+                    --max-time $((CURL_TIMEOUT+3)) \
+                    -o /dev/null -w "%{http_code}" \
+                    "http://$host/" 2>/dev/null)
+                ec2=$?
+                if [ "$http_code" = "403" ]; then
+                    printf "${RED}BLOCKED (HTTP 403)${NC}\n"
+                else
+                    case "$ec2" in
+                        0|22|35)
+                            printf "${GRN}OK via HTTP (HTTP $http_code)${NC}\n"
+                            return ;;
+                        *)
+                            printf "${RED}FAIL (exit $ec2)${NC}\n" ;;
+                    esac
+                fi ;;
+            *)
+                printf "${RED}FAIL (exit $ec)${NC}\n" ;;
+        esac
     fi
 
-    echo -n "  VPS ping ($VPS_HOST)... "
-    if is_ip "$host"; then
-        target="$host"
-    else
-        target=$(nslookup "$host" "$DNS_TRUSTED" 2>/dev/null \
-            | awk '/^Address/{print $2}' | grep -v ':' | head -1)
-        echo -n "(→ $target) "
-    fi
-    if ssh -i "$SSH_KEY" -o ConnectTimeout=15 -o StrictHostKeyChecking=no -o BatchMode=yes \
-           "$VPS_HOST" "ping -c 3 -W 3 '$target' >/dev/null 2>&1" 2>/dev/null; then
-        printf "${GRN}OK — заблокирован у провайдера${NC}\n"
-        echo "  Добавить в podkop? [y/N]"
-        read -r ans
-        [ "$ans" = "y" ] || [ "$ans" = "Y" ] && {
-            cmd_add "$(is_ip "$host" && echo ip || echo domain)" "$host"
-            cmd_reload
-        }
-    else
-        printf "${RED}FAIL — сервер глобально недоступен${NC}\n"
-    fi
+    echo -n "  VPS HTTP ($VPS_HOST)... "
+    vps_code=$(ssh -i "${SSH_KEY:-/root/.ssh/id_rsa}" \
+        -o ConnectTimeout=15 -o StrictHostKeyChecking=no -o BatchMode=yes \
+        "$VPS_HOST" \
+        "curl -sL --max-redirs 3 --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' 'https://$host/' 2>/dev/null" \
+        2>/dev/null)
+    case "$vps_code" in
+        ""|"000")
+            printf "${RED}VPS: нет ответа — сервер недоступен глобально${NC}\n" ;;
+        "403")
+            printf "${YLW}VPS: HTTP 403 — CDN-политика, не геоблок${NC}\n" ;;
+        *)
+            printf "${GRN}VPS: HTTP $vps_code — геоблок подтверждён${NC}\n"
+            printf "  Добавить в podkop? [y/N] "
+            read -r ans
+            [ "$ans" = "y" ] || [ "$ans" = "Y" ] && {
+                cmd_add "$(is_ip "$host" && echo ip || echo domain)" "$host"
+                cmd_reload
+            } ;;
+    esac
 }
 
 cmd_source() {
