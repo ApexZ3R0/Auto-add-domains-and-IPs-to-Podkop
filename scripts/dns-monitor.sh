@@ -116,5 +116,5 @@ logread | grep "dnsmasq" | grep -E "query\[A\]|query\[HTTPS\]" | while IFS= read
     fi
 done
 
-sort -u "$MANUAL" -o "$MANUAL"
+sort -u "$MANUAL" > "$MANUAL.tmp" && mv "$MANUAL.tmp" "$MANUAL"
 tail -10000 "$SEEN_FILE" > "$SEEN_FILE.tmp" && mv "$SEEN_FILE.tmp" "$SEEN_FILE"
