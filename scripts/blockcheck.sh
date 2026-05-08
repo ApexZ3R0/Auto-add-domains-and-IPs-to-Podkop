@@ -84,9 +84,9 @@ probe_wan() {
         -o /dev/null -w "%{http_code}" \
         "https://$host/" 2>/dev/null)
     ec=$?
+    [ "$http_code" = "403" ] && return 1
     case "$ec" in
-        0) return 0 ;;
-        22) [ "$http_code" = "403" ] && return 1; return 0 ;;
+        0|22|35|56) return 0 ;;
         7)
             http_code=$(curl -sL --max-redirs 5 \
                 --interface "$WAN_IFACE" \
@@ -95,12 +95,11 @@ probe_wan() {
                 -o /dev/null -w "%{http_code}" \
                 "http://$host/" 2>/dev/null)
             ec2=$?
+            [ "$http_code" = "403" ] && return 1
             case "$ec2" in
-                0) return 0 ;;
-                22) [ "$http_code" = "403" ] && return 1; return 0 ;;
+                0|22|35) return 0 ;;
                 *) return 1 ;;
             esac ;;
-        35|56) return 0 ;;
         *) return 1 ;;
     esac
 }
