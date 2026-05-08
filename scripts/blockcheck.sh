@@ -103,23 +103,23 @@ probe_wan() {
 }
 
 # ── Ping с VPS через SSH ───────────────────────────────────────────────────────
-probe_vps_ping() {
+probe_vps_tcp() {
     host="$1"
     if is_ip "$host"; then
         target="$host"
     else
-        # Резолвим через доверенный DNS чтобы не попасть под локальный спуфинг
         target=$(nslookup "$host" "$DNS_TRUSTED" 2>/dev/null \
-            | awk '/^Address/{print $2}' | grep -v ':' | head -1)
-        [ -z "$target" ] && { log "VPS ping SKIP $host: не резолвится"; return 1; }
+            | awk '/^Address/{print $2}' | grep -v ':' | grep -v '^127\.' | head -1)
+        [ -z "$target" ] && { log "VPS TCP SKIP $host: не резолвится"; return 1; }
     fi
 
-    ssh -i "$SSH_KEY" -o ConnectTimeout="$VPS_SSH_TIMEOUT" \
+    result=$(ssh -i "$SSH_KEY" -o ConnectTimeout="$VPS_SSH_TIMEOUT" \
         -o StrictHostKeyChecking=no \
         -o BatchMode=yes \
         "$VPS_HOST" \
-        "ping -c 3 -W 3 '$target' >/dev/null 2>&1" \
-        2>/dev/null
+        "timeout 3 bash -c \"echo >/dev/tcp/$target/443\" 2>/dev/null && echo ok || echo fail" \
+        2>/dev/null)
+    [ "$result" = "ok" ]
 }
 
 # ── Добавить в podkop ─────────────────────────────────────────────────────────
@@ -191,13 +191,13 @@ check_host() {
 
     if [ "$consec" -ge "$FAIL_THRESHOLD" ]; then
         log "Threshold reached for $host — проверяю VPS ping..."
-        if probe_vps_ping "$host"; then
-            log "VPS ping OK: $host — добавляю в podkop"
+        if probe_vps_tcp "$host"; then
+            log "VPS TCP OK: $host — добавляю в podkop"
             add_to_podkop "$host"
             /etc/init.d/podkop reload 2>/dev/null || true
             log "podkop reload после добавления $host"
         else
-            log "VPS ping FAIL: $host — сервер глобально недоступен, пропускаю"
+            log "VPS TCP FAIL: $host — сервер глобально недоступен, пропускаю"
             # Сбрасываем счётчик — это не блокировка
             reset_fails "$host"
         fi
